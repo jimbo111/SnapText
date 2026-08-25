@@ -3,7 +3,13 @@ import SwiftUI
 struct ScannerView: View {
     @EnvironmentObject private var store: CaptureStore
     @StateObject private var camera = CameraService()
+    @StateObject private var liveText = LiveTextDetector()
+    @State private var cropState = CropState()
     @Environment(\.scenePhase) private var scenePhase
+
+    @State private var viewSize: CGSize = .zero
+    @State private var cropEnabled = false
+    @State private var cropRect: CGRect?
 
     @State private var isProcessing = false
     @State private var flashOpacity = 0.0
@@ -16,7 +22,7 @@ struct ScannerView: View {
 
             switch camera.status {
             case .running, .idle:
-                cameraLayer
+                cameraArea
             case .denied:
                 PermissionMessage(
                     icon: "camera.fill",
@@ -36,7 +42,15 @@ struct ScannerView: View {
             overlayControls
         }
         .statusBarHidden()
-        .onAppear { camera.start() }
+        .onAppear {
+            camera.frameHandler = { [weak liveText] buffer in
+                liveText?.process(buffer)
+            }
+            liveText.regionProvider = { [cropState] buffer in
+                cropState.visionROI(for: buffer)
+            }
+            camera.start()
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: camera.start()
@@ -44,6 +58,10 @@ struct ScannerView: View {
             default: break
             }
         }
+        .onChange(of: cropEnabled) { _, _ in syncCrop() }
+        .onChange(of: cropRect) { _, _ in syncCrop() }
+        .onChange(of: camera.position) { _, _ in syncCrop() }
+        .onChange(of: showCaptures) { _, shown in liveText.isPaused = shown }
         .sheet(isPresented: $showCaptures) {
             CapturesListView()
         }
@@ -51,23 +69,32 @@ struct ScannerView: View {
 
     // MARK: - Layers
 
-    private var cameraLayer: some View {
-        ZStack {
-            CameraPreview(session: camera.session)
-                .ignoresSafeArea()
+    private var cameraArea: some View {
+        GeometryReader { geo in
+            ZStack {
+                CameraPreview(session: camera.session)
 
-            Color.white
-                .opacity(flashOpacity)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
+                Color.white
+                    .opacity(flashOpacity)
+                    .allowsHitTesting(false)
+
+                if cropEnabled {
+                    CropBoxOverlay(rect: cropBinding, containerSize: geo.size, onTap: capture)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { capture() }
+            .onChange(of: geo.size, initial: true) { _, size in
+                viewSize = size
+                syncCrop()
+            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { capture() }
+        .ignoresSafeArea()
     }
 
     private var overlayControls: some View {
-        VStack {
-            HStack {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
                 if camera.status == .running && camera.position == .back {
                     ControlButton(
                         systemImage: camera.isTorchOn ? "bolt.fill" : "bolt.slash",
@@ -79,6 +106,13 @@ struct ScannerView: View {
                 Spacer()
                 if camera.status == .running {
                     ControlButton(
+                        systemImage: cropEnabled ? "viewfinder.rectangular" : "viewfinder",
+                        label: cropEnabled ? "Capture full frame" : "Capture a region",
+                        isActive: cropEnabled
+                    ) {
+                        toggleCrop()
+                    }
+                    ControlButton(
                         systemImage: "arrow.triangle.2.circlepath.camera",
                         label: "Flip camera"
                     ) {
@@ -88,6 +122,23 @@ struct ScannerView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 12)
+
+            if camera.status == .running, let snippet = liveText.snippet, !isProcessing {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.viewfinder")
+                        .font(.caption)
+                    Text(snippet)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.55), in: Capsule())
+                .padding(.top, 10)
+                .padding(.horizontal, 40)
+                .transition(.opacity)
+            }
 
             Spacer()
 
@@ -100,11 +151,12 @@ struct ScannerView: View {
 
             bottomBar
         }
+        .animation(.easeInOut(duration: 0.15), value: liveText.snippet)
     }
 
     private var bottomBar: some View {
         HStack {
-            Text(camera.status == .running ? "Tap anywhere to capture text" : "")
+            Text(hintText)
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.7))
 
@@ -131,6 +183,44 @@ struct ScannerView: View {
         .padding(.bottom, 16)
     }
 
+    private var hintText: String {
+        guard camera.status == .running else { return "" }
+        return cropEnabled ? "Frame the text, then tap to capture" : "Tap anywhere to capture text"
+    }
+
+    // MARK: - Crop region
+
+    private var cropBinding: Binding<CGRect> {
+        Binding(
+            get: { cropRect ?? Self.defaultCropRect(in: viewSize) },
+            set: { cropRect = $0 }
+        )
+    }
+
+    private static func defaultCropRect(in size: CGSize) -> CGRect {
+        guard size.width > 100, size.height > 200 else {
+            return CGRect(x: 24, y: 200, width: 250, height: 180)
+        }
+        let width = size.width - 48
+        let height = size.height * 0.3
+        return CGRect(x: 24, y: (size.height - height) / 2, width: width, height: height)
+    }
+
+    private func toggleCrop() {
+        if !cropEnabled && cropRect == nil {
+            cropRect = Self.defaultCropRect(in: viewSize)
+        }
+        cropEnabled.toggle()
+    }
+
+    private func syncCrop() {
+        cropState.update(
+            rect: cropEnabled ? cropBinding.wrappedValue : nil,
+            viewSize: viewSize,
+            mirrored: camera.position == .front
+        )
+    }
+
     // MARK: - Capture
 
     private func capture() {
@@ -145,16 +235,17 @@ struct ScannerView: View {
         withAnimation(.easeOut(duration: 0.08)) { flashOpacity = 0.65 }
         withAnimation(.easeIn(duration: 0.25).delay(0.08)) { flashOpacity = 0 }
 
+        let roi = cropState.visionROI(for: buffer)
         Task {
             let text = await Task.detached(priority: .userInitiated) {
-                try? OCRService.recognizeText(in: buffer)
+                try? OCRService.recognizeText(in: buffer, regionOfInterest: roi)
             }.value
 
             isProcessing = false
             let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if trimmed.isEmpty {
                 UINotificationFeedbackGenerator().notificationOccurred(.warning)
-                showToast(Toast(kind: .warning, message: "No text found"))
+                showToast(Toast(kind: .warning, message: cropEnabled ? "No text found in the frame" : "No text found"))
             } else {
                 store.add(text: trimmed)
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -210,15 +301,16 @@ private struct ToastView: View {
 private struct ControlButton: View {
     let systemImage: String
     let label: String
+    var isActive = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(isActive ? .black : .white)
                 .frame(width: 44, height: 44)
-                .background(.black.opacity(0.45), in: Circle())
+                .background(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.black.opacity(0.45)), in: Circle())
         }
         .accessibilityLabel(label)
     }

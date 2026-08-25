@@ -1,9 +1,11 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CapturesListView: View {
     @EnvironmentObject private var store: CaptureStore
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAll = false
+    @State private var showFileExporter = false
 
     var body: some View {
         NavigationStack {
@@ -51,6 +53,11 @@ struct CapturesListView: View {
                             } label: {
                                 Label("Copy all", systemImage: "doc.on.doc")
                             }
+                            Button {
+                                showFileExporter = true
+                            } label: {
+                                Label("Save to Files", systemImage: "folder")
+                            }
                             Button(role: .destructive) {
                                 confirmDeleteAll = true
                             } label: {
@@ -73,7 +80,32 @@ struct CapturesListView: View {
             ) {
                 Button("Delete all", role: .destructive) { store.deleteAll() }
             }
+            .fileExporter(
+                isPresented: $showFileExporter,
+                document: TextFileDocument(text: store.combinedText),
+                contentType: .plainText,
+                defaultFilename: "SnapText Captures"
+            ) { _ in }
         }
+    }
+}
+
+struct TextFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.plainText] }
+
+    var text: String
+
+    init(text: String) {
+        self.text = text
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        let data = configuration.file.regularFileContents ?? Data()
+        text = String(data: data, encoding: .utf8) ?? ""
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
     }
 }
 

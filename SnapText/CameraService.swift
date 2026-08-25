@@ -17,6 +17,9 @@ final class CameraService: NSObject, ObservableObject {
 
     let session = AVCaptureSession()
 
+    /// Called on the frame queue with every new frame. Set before start().
+    var frameHandler: ((CVPixelBuffer) -> Void)?
+
     private let sessionQueue = DispatchQueue(label: "SnapText.camera.session")
     private let frameQueue = DispatchQueue(label: "SnapText.camera.frames")
     private let output = AVCaptureVideoDataOutput()
@@ -163,5 +166,6 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         frameLock.lock()
         latestFrame = buffer
         frameLock.unlock()
+        frameHandler?(buffer)
     }
 }
