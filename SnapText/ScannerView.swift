@@ -15,6 +15,7 @@ struct ScannerView: View {
     @State private var flashOpacity = 0.0
     @State private var toast: Toast?
     @State private var showCaptures = false
+    @State private var zoomGestureBase: CGFloat?
 
     var body: some View {
         ZStack {
@@ -84,12 +85,25 @@ struct ScannerView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { capture() }
+            .simultaneousGesture(zoomGesture)
             .onChange(of: geo.size, initial: true) { _, size in
                 viewSize = size
+                if let rect = cropRect {
+                    cropRect = Self.clampedToContainer(rect, in: size)
+                }
                 syncCrop()
             }
         }
         .ignoresSafeArea()
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                if zoomGestureBase == nil { zoomGestureBase = camera.zoomFactor }
+                camera.setZoomFactor((zoomGestureBase ?? 1) * value.magnification)
+            }
+            .onEnded { _ in zoomGestureBase = nil }
     }
 
     private var overlayControls: some View {
@@ -123,6 +137,17 @@ struct ScannerView: View {
             .padding(.horizontal, 20)
             .padding(.top, 12)
 
+            if camera.status == .running, camera.zoomFactor > 1.05 {
+                Text(String(format: "%.1f×", camera.zoomFactor))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .padding(.top, 10)
+                    .allowsHitTesting(false)
+            }
+
             if camera.status == .running, let snippet = liveText.snippet, !isProcessing {
                 HStack(spacing: 6) {
                     Image(systemName: "text.viewfinder")
@@ -138,6 +163,7 @@ struct ScannerView: View {
                 .padding(.top, 10)
                 .padding(.horizontal, 40)
                 .transition(.opacity)
+                .allowsHitTesting(false)
             }
 
             Spacer()
@@ -147,6 +173,7 @@ struct ScannerView: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 12)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .allowsHitTesting(false)
             }
 
             bottomBar
@@ -159,6 +186,7 @@ struct ScannerView: View {
             Text(hintText)
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.7))
+                .allowsHitTesting(false)
 
             Spacer()
 
@@ -195,6 +223,16 @@ struct ScannerView: View {
             get: { cropRect ?? Self.defaultCropRect(in: viewSize) },
             set: { cropRect = $0 }
         )
+    }
+
+    private static func clampedToContainer(_ rect: CGRect, in size: CGSize) -> CGRect {
+        guard size.width > 48, size.height > 48 else { return rect }
+        var r = rect
+        r.size.width = min(r.width, size.width - 24)
+        r.size.height = min(r.height, size.height - 24)
+        r.origin.x = min(max(12, r.origin.x), size.width - 12 - r.width)
+        r.origin.y = min(max(12, r.origin.y), size.height - 12 - r.height)
+        return r
     }
 
     private static func defaultCropRect(in size: CGSize) -> CGRect {

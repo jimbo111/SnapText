@@ -6,6 +6,13 @@ struct CapturesListView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAll = false
     @State private var showFileExporter = false
+    @State private var searchText = ""
+
+    private var filteredCaptures: [Capture] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return store.captures }
+        return store.captures.filter { $0.text.localizedCaseInsensitiveContains(query) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -16,9 +23,11 @@ struct CapturesListView: View {
                         systemImage: "text.viewfinder",
                         description: Text("Point the camera at any text and tap the screen to save it.")
                     )
+                } else if filteredCaptures.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
                 } else {
                     List {
-                        ForEach(store.captures) { capture in
+                        ForEach(filteredCaptures) { capture in
                             NavigationLink(value: capture) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(capture.text)
@@ -30,12 +39,19 @@ struct CapturesListView: View {
                                 }
                                 .padding(.vertical, 2)
                             }
+                            .swipeActions {
+                                Button(role: .destructive) {
+                                    store.delete(capture)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                         }
-                        .onDelete { store.delete(at: $0) }
                     }
                     .listStyle(.plain)
                 }
             }
+            .searchable(text: $searchText, prompt: "Search captures")
             .navigationTitle("Captures")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: Capture.self) { capture in

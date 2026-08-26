@@ -26,10 +26,8 @@ final class CaptureStore: ObservableObject {
         save()
     }
 
-    func delete(at offsets: IndexSet) {
-        for index in offsets.sorted(by: >) where captures.indices.contains(index) {
-            captures.remove(at: index)
-        }
+    func delete(_ capture: Capture) {
+        captures.removeAll { $0.id == capture.id }
         save()
     }
 
@@ -44,10 +42,17 @@ final class CaptureStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([Capture].self, from: data)
-        else { return }
-        captures = decoded
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: fileURL)
+            captures = try JSONDecoder().decode([Capture].self, from: data)
+        } catch {
+            // Keep the unreadable file for manual recovery; otherwise the next
+            // save would silently overwrite it and lose every past capture.
+            let backupURL = fileURL.appendingPathExtension("bak")
+            try? FileManager.default.removeItem(at: backupURL)
+            try? FileManager.default.moveItem(at: fileURL, to: backupURL)
+        }
     }
 
     private func save() {
@@ -55,7 +60,7 @@ final class CaptureStore: ObservableObject {
             let data = try JSONEncoder().encode(captures)
             try data.write(to: fileURL, options: .atomic)
         } catch {
-            assertionFailure("Failed to persist captures: \(error)")
+            // Disk-full or similar; captures stay available in memory for this session.
         }
     }
 }

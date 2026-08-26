@@ -57,7 +57,8 @@ struct CropBoxOverlay: View {
     let containerSize: CGSize
     let onTap: () -> Void
 
-    @State private var dragStart: CGRect?
+    @State private var moveStart: CGRect?
+    @State private var resizeStart: CGRect?
 
     private static let minSize = CGSize(width: 100, height: 80)
     private static let inset: CGFloat = 12
@@ -114,23 +115,23 @@ struct CropBoxOverlay: View {
     private var moveGesture: some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
-                if dragStart == nil { dragStart = rect }
-                guard var moved = dragStart else { return }
+                if moveStart == nil { moveStart = rect }
+                guard var moved = moveStart else { return }
                 moved.origin.x += value.translation.width
                 moved.origin.y += value.translation.height
                 rect = clampedPosition(moved)
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { _ in moveStart = nil }
     }
 
     private func resizeGesture(for corner: Corner) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                if dragStart == nil { dragStart = rect }
-                guard let start = dragStart else { return }
+                if resizeStart == nil { resizeStart = rect }
+                guard let start = resizeStart else { return }
                 rect = resized(start, corner: corner, by: value.translation)
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { _ in resizeStart = nil }
     }
 
     // MARK: - Geometry

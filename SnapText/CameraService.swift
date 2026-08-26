@@ -14,17 +14,30 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var status: Status = .idle
     @Published private(set) var position: AVCaptureDevice.Position = .back
     @Published private(set) var isTorchOn = false
+    @Published private(set) var zoomFactor: CGFloat = 1
 
     let session = AVCaptureSession()
 
-    /// Called on the frame queue with every new frame. Set before start().
-    var frameHandler: ((CVPixelBuffer) -> Void)?
+    /// Called on the frame queue with every new frame.
+    var frameHandler: ((CVPixelBuffer) -> Void)? {
+        get {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            return _frameHandler
+        }
+        set {
+            frameLock.lock()
+            _frameHandler = newValue
+            frameLock.unlock()
+        }
+    }
 
     private let sessionQueue = DispatchQueue(label: "SnapText.camera.session")
     private let frameQueue = DispatchQueue(label: "SnapText.camera.frames")
     private let output = AVCaptureVideoDataOutput()
     private let frameLock = NSLock()
     private var latestFrame: CVPixelBuffer?
+    private var _frameHandler: ((CVPixelBuffer) -> Void)?
 
     func start() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -47,7 +60,10 @@ final class CameraService: NSObject, ObservableObject {
 
     func stop() {
         sessionQueue.async { [weak self] in
-            self?.session.stopRunning()
+            guard let self else { return }
+            self.session.stopRunning()
+            // stopRunning() physically turns the torch off.
+            DispatchQueue.main.async { self.isTorchOn = false }
         }
     }
 
@@ -58,6 +74,22 @@ final class CameraService: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.position = newPosition
                 self.isTorchOn = false
+                self.zoomFactor = 1
+            }
+        }
+    }
+
+    func setZoomFactor(_ factor: CGFloat) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentDevice() else { return }
+            let clamped = max(1, min(factor, min(device.activeFormat.videoMaxZoomFactor, 10)))
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
+                device.unlockForConfiguration()
+                DispatchQueue.main.async { self.zoomFactor = clamped }
+            } catch {
+                // Zoom is a convenience; ignore configuration failures.
             }
         }
     }
@@ -126,10 +158,18 @@ final class CameraService: NSObject, ObservableObject {
     private func replaceInput(position: AVCaptureDevice.Position) -> Bool {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
-        for input in session.inputs {
+        let previousInputs = session.inputs
+        for input in previousInputs {
             session.removeInput(input)
         }
-        guard addInput(position: position) else { return false }
+        guard addInput(position: position) else {
+            // Put the working camera back rather than leaving the session with no input.
+            for input in previousInputs where session.canAddInput(input) {
+                session.addInput(input)
+            }
+            applyPortraitRotation()
+            return false
+        }
         applyPortraitRotation()
         clearLatestFrame()
         return true
@@ -165,7 +205,8 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         frameLock.lock()
         latestFrame = buffer
+        let handler = _frameHandler
         frameLock.unlock()
-        frameHandler?(buffer)
+        handler?(buffer)
     }
 }
