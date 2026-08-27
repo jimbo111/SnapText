@@ -14,7 +14,9 @@ enum OCRService {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = fast ? .fast : .accurate
         request.usesLanguageCorrection = !fast
-        request.automaticallyDetectsLanguage = true
+        // Language detection adds a per-frame cost the throttled preview doesn't
+        // need; only the accurate save path pays for it.
+        request.automaticallyDetectsLanguage = !fast
         if let regionOfInterest {
             request.regionOfInterest = regionOfInterest
         }

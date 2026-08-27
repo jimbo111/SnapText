@@ -1,11 +1,20 @@
 import SwiftUI
+import Vision
+
+enum ScanMode: String {
+    case text
+    case code
+}
 
 struct ScannerView: View {
     @EnvironmentObject private var store: CaptureStore
     @StateObject private var camera = CameraService()
     @StateObject private var liveText = LiveTextDetector()
+    @StateObject private var liveCode = LiveCodeDetector()
     @State private var cropState = CropState()
     @Environment(\.scenePhase) private var scenePhase
+
+    @AppStorage("scanMode") private var scanMode: ScanMode = .code
 
     @State private var viewSize: CGSize = .zero
     @State private var cropEnabled = false
@@ -28,14 +37,14 @@ struct ScannerView: View {
                 PermissionMessage(
                     icon: "camera.fill",
                     title: "Camera access needed",
-                    message: "SnapText reads text through the camera. Allow camera access in Settings.",
+                    message: "SnapText scans codes and text through the camera. Allow camera access in Settings.",
                     showsSettingsButton: true
                 )
             case .unavailable:
                 PermissionMessage(
                     icon: "video.slash.fill",
                     title: "No camera available",
-                    message: "This device has no usable camera. Captured texts are still available in your list.",
+                    message: "This device has no usable camera. Saved captures are still available in your list.",
                     showsSettingsButton: false
                 )
             }
@@ -44,12 +53,20 @@ struct ScannerView: View {
         }
         .statusBarHidden()
         .onAppear {
-            camera.frameHandler = { [weak liveText] buffer in
+            camera.frameHandler = { [weak liveText, weak liveCode] buffer in
                 liveText?.process(buffer)
+                liveCode?.process(buffer)
             }
             liveText.regionProvider = { [cropState] buffer in
                 cropState.visionROI(for: buffer)
             }
+            liveCode.regionProvider = { [cropState] buffer in
+                cropState.visionROI(for: buffer)
+            }
+            liveCode.onCode = { code in
+                saveCode(code)
+            }
+            syncDetectorPauses()
             camera.start()
         }
         .onChange(of: scenePhase) { _, phase in
@@ -62,7 +79,8 @@ struct ScannerView: View {
         .onChange(of: cropEnabled) { _, _ in syncCrop() }
         .onChange(of: cropRect) { _, _ in syncCrop() }
         .onChange(of: camera.position) { _, _ in syncCrop() }
-        .onChange(of: showCaptures) { _, shown in liveText.isPaused = shown }
+        .onChange(of: showCaptures) { _, _ in syncDetectorPauses() }
+        .onChange(of: scanMode) { _, _ in syncDetectorPauses() }
         .sheet(isPresented: $showCaptures) {
             CapturesListView()
         }
@@ -148,9 +166,9 @@ struct ScannerView: View {
                     .allowsHitTesting(false)
             }
 
-            if camera.status == .running, let snippet = liveText.snippet, !isProcessing {
+            if let (icon, snippet) = livePreviewChip, !isProcessing {
                 HStack(spacing: 6) {
-                    Image(systemName: "text.viewfinder")
+                    Image(systemName: icon)
                         .font(.caption)
                     Text(snippet)
                         .font(.caption)
@@ -176,9 +194,27 @@ struct ScannerView: View {
                     .allowsHitTesting(false)
             }
 
+            if camera.status == .running {
+                ScanModePicker(mode: $scanMode)
+                    .padding(.bottom, 12)
+            }
+
             bottomBar
         }
         .animation(.easeInOut(duration: 0.15), value: liveText.snippet)
+        .animation(.easeInOut(duration: 0.15), value: liveCode.liveCode)
+    }
+
+    private var livePreviewChip: (icon: String, snippet: String)? {
+        guard camera.status == .running else { return nil }
+        switch scanMode {
+        case .text:
+            guard let snippet = liveText.snippet else { return nil }
+            return ("text.viewfinder", snippet)
+        case .code:
+            guard let code = liveCode.liveCode else { return nil }
+            return ("qrcode.viewfinder", "\(code.symbology.displayName) · \(code.payload)")
+        }
     }
 
     private var bottomBar: some View {
@@ -205,7 +241,7 @@ struct ScannerView: View {
                 .padding(.vertical, 9)
                 .background(.white.opacity(0.18), in: Capsule())
             }
-            .accessibilityLabel("Show \(store.captures.count) captured texts")
+            .accessibilityLabel("Show \(store.captures.count) saved captures")
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 16)
@@ -213,7 +249,12 @@ struct ScannerView: View {
 
     private var hintText: String {
         guard camera.status == .running else { return "" }
-        return cropEnabled ? "Frame the text, then tap to capture" : "Tap anywhere to capture text"
+        switch scanMode {
+        case .text:
+            return cropEnabled ? "Frame the text, then tap to capture" : "Tap anywhere to capture text"
+        case .code:
+            return cropEnabled ? "Frame a code — it saves itself" : "Point at a code — it saves itself"
+        }
     }
 
     // MARK: - Crop region
@@ -259,6 +300,11 @@ struct ScannerView: View {
         )
     }
 
+    private func syncDetectorPauses() {
+        liveText.isPaused = showCaptures || scanMode != .text
+        liveCode.isPaused = showCaptures || scanMode != .code
+    }
+
     // MARK: - Capture
 
     private func capture() {
@@ -274,6 +320,13 @@ struct ScannerView: View {
         withAnimation(.easeIn(duration: 0.25).delay(0.08)) { flashOpacity = 0 }
 
         let roi = cropState.visionROI(for: buffer)
+        switch scanMode {
+        case .text: captureText(from: buffer, roi: roi)
+        case .code: captureCodes(from: buffer, roi: roi)
+        }
+    }
+
+    private func captureText(from buffer: CVPixelBuffer, roi: CGRect?) {
         Task {
             let text = await Task.detached(priority: .userInitiated) {
                 try? OCRService.recognizeText(in: buffer, regionOfInterest: roi)
@@ -290,6 +343,37 @@ struct ScannerView: View {
                 showToast(Toast(kind: .success, message: trimmed))
             }
         }
+    }
+
+    private func captureCodes(from buffer: CVPixelBuffer, roi: CGRect?) {
+        Task {
+            let codes = await Task.detached(priority: .userInitiated) {
+                (try? BarcodeService.detectCodes(in: buffer, regionOfInterest: roi)) ?? []
+            }.value
+
+            isProcessing = false
+            if codes.isEmpty {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                showToast(Toast(kind: .warning, message: cropEnabled ? "No code found in the frame" : "No code found"))
+                return
+            }
+            // Route through the live detector's dedupe so a tap never double-saves
+            // what auto-capture just stored.
+            let fresh = liveCode.register(codes)
+            if fresh.isEmpty {
+                showToast(Toast(kind: .success, message: "Already saved"))
+            } else {
+                for code in fresh {
+                    saveCode(code)
+                }
+            }
+        }
+    }
+
+    private func saveCode(_ code: DetectedCode) {
+        store.add(text: code.payload, kind: .code, symbology: code.symbology.displayName)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        showToast(Toast(kind: .success, message: "\(code.symbology.displayName) · \(code.payload)"))
     }
 
     private func showToast(_ newToast: Toast) {
@@ -314,6 +398,38 @@ struct Toast: Identifiable, Equatable {
     let id = UUID()
     let kind: Kind
     let message: String
+}
+
+private struct ScanModePicker: View {
+    @Binding var mode: ScanMode
+
+    var body: some View {
+        HStack(spacing: 4) {
+            segment("Code", icon: "qrcode.viewfinder", value: .code)
+            segment("Text", icon: "text.viewfinder", value: .text)
+        }
+        .padding(4)
+        .background(.black.opacity(0.55), in: Capsule())
+    }
+
+    private func segment(_ title: String, icon: String, value: ScanMode) -> some View {
+        Button {
+            mode = value
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                Text(title)
+                    .fontWeight(.semibold)
+            }
+            .font(.footnote)
+            .foregroundStyle(mode == value ? .black : .white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(mode == value ? AnyShapeStyle(.white) : AnyShapeStyle(.clear), in: Capsule())
+        }
+        .accessibilityLabel("Scan \(title.lowercased())")
+        .accessibilityAddTraits(mode == value ? .isSelected : [])
+    }
 }
 
 private struct ToastView: View {

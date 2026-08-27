@@ -20,8 +20,8 @@ struct CapturesListView: View {
                 if store.captures.isEmpty {
                     ContentUnavailableView(
                         "No captures yet",
-                        systemImage: "text.viewfinder",
-                        description: Text("Point the camera at any text and tap the screen to save it.")
+                        systemImage: "qrcode.viewfinder",
+                        description: Text("Point the camera at a QR code or barcode to save it, or switch to Text mode and tap to capture text.")
                     )
                 } else if filteredCaptures.isEmpty {
                     ContentUnavailableView.search(text: searchText)
@@ -33,9 +33,20 @@ struct CapturesListView: View {
                                     Text(capture.text)
                                         .font(.subheadline)
                                         .lineLimit(3)
-                                    Text(capture.date, format: .dateTime.month().day().hour().minute())
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 6) {
+                                        if capture.kind == .code {
+                                            Label(capture.symbology ?? "Code", systemImage: "qrcode")
+                                                .labelStyle(.titleAndIcon)
+                                                .font(.caption2.weight(.medium))
+                                                .foregroundStyle(.secondary)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(.quaternary, in: Capsule())
+                                        }
+                                        Text(capture.date, format: .dateTime.month().day().hour().minute())
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                                 .padding(.vertical, 2)
                             }
@@ -129,13 +140,36 @@ private struct CaptureDetailView: View {
     let capture: Capture
     @State private var copied = false
 
+    private var linkURL: URL? {
+        guard capture.kind == .code,
+              let url = URL(string: capture.text),
+              url.scheme == "http" || url.scheme == "https"
+        else { return nil }
+        return url
+    }
+
     var body: some View {
         ScrollView {
-            Text(capture.text)
-                .font(.body)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
+            VStack(alignment: .leading, spacing: 16) {
+                if capture.kind == .code {
+                    Label(capture.symbology ?? "Code", systemImage: "qrcode")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.quaternary, in: Capsule())
+                }
+                Text(capture.text)
+                    .font(capture.kind == .code ? .body.monospaced() : .body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let linkURL {
+                    Link(destination: linkURL) {
+                        Label("Open Link", systemImage: "safari")
+                    }
+                }
+            }
+            .padding(20)
         }
         .navigationTitle(capture.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
