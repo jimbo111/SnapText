@@ -146,7 +146,11 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     private func addOutput() -> Bool {
-        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        // The sensor's native biplanar YCbCr format: Vision consumes it directly,
+        // and requesting BGRA here would force a color conversion on every frame.
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        ]
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: frameQueue)
         guard session.canAddOutput(output) else { return false }
